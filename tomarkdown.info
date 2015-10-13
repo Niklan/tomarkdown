@@ -1,0 +1,8 @@
+name = To Markdown
+description = This module provide interface form migrate fields from html to makrdown.
+version = 7.x-1.x
+core = 7.x
+
+configure = admin/config/content/formats/tomarkdown
+
+files[] = vendor/html-to-markdown/HtmlConverter.php

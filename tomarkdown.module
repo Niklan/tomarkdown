@@ -1,0 +1,195 @@
+<?php
+
+/**
+ * @file
+ * Main code for module.
+ */
+
+require 'vendor/autoload.php';
+use League\HTMLToMarkdown\HtmlConverter;
+
+/**
+ * Implements hook_menu().
+ */
+function tomarkdown_menu() {
+  $items['admin/config/content/formats/tomarkdown'] = array(
+    'title' => 'To Markdown',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('tomarkdown_form'),
+    'access arguments' => array('administer content'),
+    'type' => MENU_LOCAL_TASK,
+  );
+
+  return $items;
+}
+
+/**
+ * Migrating form.
+ */
+function tomarkdown_form($form, &$form_state) {
+  // Store fields defined on site.
+  $fields = array();
+  foreach (field_info_fields() as $field_name => $field_info) {
+    $fields[$field_info['type']] = array(
+      $field_name => $field_name,
+    );
+  }
+
+  $form['field'] = array(
+    '#type' => 'select',
+    '#title' => t('Field'),
+    '#options' => $fields,
+    '#description' => t('Select field, for which value you want to do migration. For safer migration you must do migration for each field separately.'),
+    '#required' => TRUE,
+  );
+
+  // Store Entity items defined on site.
+  $entities = array();
+  foreach (entity_get_info() as $entity_type => $info) {
+    $entities[$entity_type] = $info['label'] . ' (' . $entity_type . ')';
+  }
+
+  $form['entity_type'] = array(
+    '#type' => 'select',
+    '#title' => t('Entity type'),
+    '#options' => $entities,
+    '#empty_option' => t('All'),
+    '#description' => t('If you select entity type, then only field values for this entity type will affected.'),
+    '#ajax' => array(
+      'callback' => 'tomarkdown_ajax_form',
+      'wrapper' => 'tomarkdown-form',
+    ),
+    '#required' => TRUE,
+  );
+
+  if (empty($form_state['selected_entity'])) {
+    $form_state['selected_entity'] = NULL;
+  }
+
+  //dpm($form_state);
+  $bundles = array();
+  if (!empty($form_state['values']['entity_type'])) {
+    $bundle_list = field_info_bundles();
+    foreach ($bundle_list[$form_state['values']['entity_type']] as $bundle_name => $bundle_info) {
+      $bundles[$bundle_name] = $bundle_info['label'] . ' (' . $bundle_name . ')';
+    }
+  }
+  $form['bundle_type'] = array(
+    '#type' => 'select',
+    '#title' => t('Bundle type'),
+    '#options' => $bundles,
+    '#description' => t('Select for which bundles you want to do migration. You can select multiple bundles with CTRL key.'),
+    '#states' => array(
+      'visible' => array(
+        ':input[name="entity_type"]' => array('!value' => ''),
+      )
+    ),
+    '#required' => TRUE,
+    '#multiple' => TRUE,
+  );
+
+  $text_formats = array();
+  foreach (filter_formats() as $format_name => $format_info) {
+    $text_formats[$format_name] = $format_info->name . ' (' . $format_name . ')';
+  }
+  $form['text_format'] = array(
+    '#type' => 'select',
+    '#title' => t('Change text format'),
+    '#options' => $text_formats,
+    '#empty_option' => t('Not change text format'),
+    '#description' => t('You can select new text format for field. It\'s helpful if you created new text format for Markdown.'),
+  );
+
+  $form['submit'] = array(
+    '#type' => 'submit',
+    '#value' => t('Migrate'),
+  );
+
+  return $form;
+}
+
+/**
+ * AJAX callback for entity select.
+ *
+ * @param $form
+ * @param $form_state
+ * @return mixed
+ */
+function tomarkdown_ajax_form($form, &$form_state) {
+  return $form;
+}
+
+/**
+ * Prepare and start batch migration.
+ *
+ * @param $form
+ * @param $form_state
+ */
+function tomarkdown_form_submit($form, &$form_state) {
+  $values = $form_state['values'];
+  // Select entity id's.
+  $entity_ids = db_select('field_data_' . $values['field'], 'f')
+    ->fields('f', array('entity_id'))
+    ->condition('f.entity_type', $values['entity_type'])
+    ->condition('f.bundle', $values, 'IN')
+    ->execute();
+
+  foreach ($entity_ids as $row) {
+    $operations[] = array('tomarkdown_convert_to_markdown', array($row->entity_id, $values));
+  }
+
+  $batch = array(
+    'operations' => $operations,
+    'finished' => 'tomarkdown_batch_finished',
+    'title' => t('Converting to Markdown.'),
+  );
+
+  batch_set($batch);
+}
+
+/**
+ * Convert to markdown in batch.
+ *
+ * @param $eid
+ * @param $values
+ * @param $context
+ */
+function tomarkdown_convert_to_markdown($eid, $values, &$context) {
+  $wrapper = entity_metadata_wrapper($values['entity_type'], $eid);
+  $field_value = $wrapper->$values['field']->value();
+
+  if ($field_value['format'] != 'markdown') {
+    $converter = new HtmlConverter();
+    $field_value['value'] = $converter->convert($field_value['value']);
+  }
+
+  // Change text format.
+  if (!empty($values['text_format'])) {
+    $field_value['format'] = $values['text_format'];
+  }
+
+  $wrapper->$values['field']->set($field_value);
+  $wrapper->save();
+
+  // Эта информация будет доступна в mymodule_batch_finished
+  $context['results'][] = $wrapper->label();
+  // Сообщение выводимое под прогресс баром после окончания текущей операции
+  $context['message'] = 'Data converted for <em>' . $wrapper->label() . '</em>';
+}
+
+/**
+ * Show message when batch is finished.
+ *
+ * @param $success
+ * @param $results
+ * @param $operations
+ * @throws \Exception
+ */
+function tomarkdown_batch_finished($success, $results, $operations) {
+  if ($success) {
+    drupal_set_message('Converted ' . count($results) . ' values:' . theme('item_list', array('items' => $results)));
+  }
+  else {
+    drupal_set_message('Finished with errors', 'error');
+  }
+}
